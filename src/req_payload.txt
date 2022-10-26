@@ -1,0 +1,1 @@
+phoneType=LIO-AN00&androidVer=10&method=rpk.appInfo&engineVer=120501201&deviceId=B8CF0399B598E8E3CA3A9B22D9AECEA49F439C866B7568E323E2BD06D648A5FC&version=3.0.1&supportRpkType=0&serviceCountry=CN&deviceIdRealType=1&serviceType=28&pkgName=

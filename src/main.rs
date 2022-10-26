@@ -1,11 +1,14 @@
-use std::{fs, fs::File, path::Path};
+use std::collections::HashMap;
+use std::process::Command;
+use std::{fs, path::Path};
 
 use clap::Parser;
-use zip::ZipArchive;
+use reqwest::header::{HeaderMap, HeaderValue};
 
-const DEFAULT_WORKSPACE: &'static str = "/tmp/dep-tools/workspace";
-const DEFAULT_RPK_DOWNLOAD_URL: &'static str =
-    "http://localhost:8080/io.scathon.quickapp.helloworld.rpk";
+use serde_json::Value;
+
+// const DEFAULT_WORKSPACE: &'static str = "/opt/huawei/release/hispace/AppGalleryQuickAppService/searchtest/fastapp/startres/application/webquickapp";
+const DEFAULT_WORKSPACE: &'static str = "/opt/xxxx/yyyy";
 const TMP_DOWNLOAD_DIR: &'static str = "/tmp/download";
 
 #[derive(Parser, Debug)]
@@ -42,17 +45,25 @@ type DownloadErrMsg = String;
 type DownloadResult = String;
 
 trait RpkDownload {
-    fn download(&self, package_name: String) -> Result<DownloadResult, DownloadErrMsg>;
+    fn download(
+        &self,
+        package_name: String,
+        download_url: String,
+    ) -> Result<DownloadResult, DownloadErrMsg>;
 }
 
 struct DefaultDownloader;
 
 impl RpkDownload for DefaultDownloader {
-    fn download(&self, package_name: String) -> Result<DownloadResult, DownloadErrMsg> {
+    fn download(
+        &self,
+        package_name: String,
+        download_url: String,
+    ) -> Result<DownloadResult, DownloadErrMsg> {
         let tmp_download_path = format!("{}/{}.rpk", TMP_DOWNLOAD_DIR, package_name);
         println!("saved rpk file to: {}", tmp_download_path);
         let resp_wrapper =
-            reqwest::blocking::get(DEFAULT_RPK_DOWNLOAD_URL).and_then(|resp| resp.bytes());
+            reqwest::blocking::get(download_url.as_str()).and_then(|resp| resp.bytes());
         if let Err(err) = resp_wrapper {
             return Err(err.to_string());
         }
@@ -72,19 +83,59 @@ trait RpkUnZip {
     fn unzip(zip_path: &str, unzip_path: &str) -> Result<(), String>;
 }
 
-struct DefaultRpkUnzip;
+struct ShellUnzip;
 
-impl RpkUnZip for DefaultRpkUnzip {
+impl RpkUnZip for ShellUnzip {
     fn unzip(zip_path: &str, unzip_path: &str) -> Result<(), String> {
-        // 这里文件肯定存在，所以直接unwrap
-        let zip_file = File::open(zip_path).unwrap();
-        ZipArchive::new(zip_file)
-            .and_then(|mut zip_file| zip_file.extract(unzip_path))
-            .map_err(|res| res.to_string())
+        let unzip_cmd = format!("unzip {} -d {}", zip_path, unzip_path);
+        println!("unzip cmd is: {}", unzip_cmd);
+        let exec_res = Command::new("unzip")
+            .arg(zip_path)
+            .arg("-d")
+            .arg(unzip_path)
+            .output();
+        exec_res.map(|_| ()).map_err(|err| err.to_string())
     }
 }
 
+fn search_rpk_by_packagename(package_name: &str) -> Result<String, String> {
+    let payload_template = include_str!("req_payload.txt");
+    let payload = format!("{}{}", payload_template, package_name);
+    println!("payload: {}", payload);
+    let payload = payload.as_bytes().to_vec();
+    reqwest::blocking::ClientBuilder::new()
+        .gzip(true)
+        .build()
+        .and_then(move |client| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                reqwest::header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain"),
+            );
+            client
+                .post("http://stores1.hispace.hicloud.com/hwmarket/api/tlsApis")
+                .headers(headers)
+                .body(payload)
+                .send()
+        })
+        .and_then(|resp| resp.json())
+        .map(|body: HashMap<String, Value>| {
+            println!("body: {:#?}", body);
+            let dld_url_wrapper = body
+                .get("rpkInfo")
+                .and_then(|rpk| rpk.get("url"))
+                .map(|dld_url| dld_url.as_str().unwrap());
+            // body
+            match dld_url_wrapper {
+                None => String::new(),
+                Some(dld_url) => dld_url.into(),
+            }
+        })
+        .map_err(|err| err.to_string())
+}
+
 struct DeployProcessor(DeployParam);
+
 impl DeployProcessor {
     fn process(&self) -> Result<(), String> {
         // init exec environment.
@@ -94,10 +145,16 @@ impl DeployProcessor {
         let deploy_dir = &param.deploy_dir;
         let downloader = DefaultDownloader;
 
-        downloader
-            .download(package_name.clone())
-            .and_then(|dld_res| DefaultRpkUnzip::unzip(&dld_res, &deploy_dir))
+        search_rpk_by_packagename(package_name)
+            .and_then(|download_url| downloader.download(package_name.clone(), download_url))
+            .and_then(|dld_res| ShellUnzip::unzip(&dld_res, &deploy_dir))
+            .and_then(|_| DeployProcessor::create_cert_sign(&deploy_dir))
     }
+
+    fn create_cert_sign(unzip_path: &str) -> Result<(), String> {
+        fs::write(&format!("{}/cp.cert", unzip_path), "123123123").map_err(|err| err.to_string())
+    }
+
     fn env_init(&self) {
         let download_dir = Path::new(TMP_DOWNLOAD_DIR);
         if !download_dir.exists() {
